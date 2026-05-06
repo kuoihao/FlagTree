@@ -1,6 +1,5 @@
 import ast
 import inspect
-from collections import deque
 from triton import knobs
 
 # ========
@@ -58,6 +57,8 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
         self.transpose_args_nodes = list[ast.AST]()  # tl.trans args
         # for tl.dot K-dim analyze
         self.dot_calls = list[ast.AST]()  # tl.dot call nodes
+        # for tl.load BLOCK_X <-> X pairing via tl.cdiv(X, BLOCK_X)
+        self.cdiv_calls = list[ast.Call]()  # tl.cdiv call nodes
         # desc var -> {"shape": [...], "block_shape": [...]} from make_tensor_descriptor or hook
         self.tma_device_desc_defs_map = dict[str, dict[str, list[str]]]()
         # all historical definitions per var (in order); used for arange extraction
@@ -127,13 +128,17 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
                 op=node.op,
                 right=node.value,
             )
+            self.var_all_definitions.setdefault(var_name, list[ast.AST]()) \
+                                    .append(binop)
             self.var_definitions[var_name] = binop
         self.generic_visit(node)
 
     # Record annotated assignments, mark constexpr if annotated
     def visit_AnnAssign(self, node):
-        if isinstance(node.target, ast.Name):
+        if isinstance(node.target, ast.Name) and node.value is not None:
             var_name = node.target.id
+            self.var_all_definitions.setdefault(var_name, list[ast.AST]()) \
+                                    .append(node.value)
             self.var_definitions[var_name] = node.value
 
             if node.annotation:
@@ -156,6 +161,8 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
             self.transpose_args_nodes.append(node.args[0])
         elif self._is_tl_dot(node):
             self.dot_calls.append(node)
+        elif self._is_tl_func(node, 'cdiv') and len(node.args) >= 2:
+            self.cdiv_calls.append(node)
         elif self._is_tl_make_tensor_descriptor(node):
             base = None
             # Collect the base node
@@ -423,80 +430,55 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
 
         return bs_m_map, bs_k_map
 
-    def _tl_load_expr_bfs_children(self, node: ast.AST) -> list[ast.AST]:
-        """Sub-expressions for width-first expansion (e.g. tl.load(A) after A = A + (...))."""
-        out = list[ast.AST]()
-        if isinstance(node, ast.Name):
-            if node.id in self.var_definitions:
-                out.append(self.var_definitions[node.id])
-        elif isinstance(node, ast.BinOp):
-            out.extend((node.left, node.right))
-        elif isinstance(node, ast.UnaryOp):
-            out.append(node.operand)
-        elif isinstance(node, ast.Call):
-            out.extend(node.args)
-            for kw in node.keywords:
-                out.append(kw.value)
-        elif isinstance(node, ast.Subscript):
-            out.append(node.value)
-            sl = node.slice
-            if isinstance(sl, ast.Slice):
-                for part in (sl.lower, sl.upper, sl.step):
-                    if part is not None:
-                        out.append(part)
-            elif isinstance(sl, ast.Tuple):
-                out.extend(sl.elts)
-            else:
-                out.append(sl)
-        elif isinstance(node, ast.Compare):
-            out.append(node.left)
-            out.extend(node.comparators)
-        elif isinstance(node, ast.BoolOp):
-            out.extend(node.values)
-        elif isinstance(node, ast.IfExp):
-            out.extend((node.test, node.body, node.orelse))
-        elif isinstance(node, ast.Attribute):
-            out.append(node.value)
-        return out
+    def _find_cdiv_x(self, bs_name: str) -> str | None:
+        for call in self.cdiv_calls:
+            arg0, arg1 = call.args[0], call.args[1]
+            if not (isinstance(arg0, ast.Name) and isinstance(arg1, ast.Name)):
+                continue
+            if arg1.id != bs_name:
+                continue
+            x_name = arg0.id
+            if x_name == bs_name:
+                continue
+            if x_name not in self.input_params and x_name not in self.constexpr_params:
+                continue
+            return x_name
+        return None
 
     # Analyzer 1: tl.load
     def analyze_tl_load_bs(self) -> dict[str, str]:
+        """Map BLOCK_X (used in any tl.load address) to its tensor-dim arg X.
+
+        Algorithm (driven by tl.load):
+          1. For each `tl.load(addr)` address expression, find BLOCK_X actually
+             used through the `tl.arange(0, BLOCK_X)` chain.
+          2. For each such BLOCK_X, look up a `tl.cdiv(X, BLOCK_X)` call somewhere
+             in the kernel and adopt its first argument as the paired tensor-dim X.
+
+        Examples in a typical mm kernel (any of these establishes the pair)::
+
+            grid_m = tl.cdiv(M, BLOCK_M)               # BLOCK_M <-> M
+            grid_n = tl.cdiv(N, BLOCK_N)               # BLOCK_N <-> N
+            for k in range(0, tl.cdiv(K, BLOCK_K)):    # BLOCK_K <-> K
+
+        Limitations:
+          - `tl.cdiv` is recognized via `_is_tl_func` (handles `tl.`, `language.`,
+            `triton.language.`, and bare `cdiv()`); user-defined import aliases
+            (e.g. `import triton.language as L; L.cdiv(...)`) are not recognized.
+        """
         load_map = dict[str, str]()  # [bs_name, ts_name]
         for addr_expr in self.load_addresses:
-            queue = deque[ast.AST]((addr_expr, ))
-            seen = set[int]()
-
-            while queue:
-                expr = queue.popleft()
-                eid = id(expr)
-                if eid in seen:
-                    continue
-                seen.add(eid)
-
-                tl_load_used_var_names = VariableCollector.collect(expr)
-                # Case (mm_kernel_general): a = tl.load(A + (ram[:, None] * stride_am + rk[None, :] * stride_ak))
-                #   tl_load_used_var_names = {'A', 'ram', 'stride_am', 'stride_ak', 'rk'}
-                for var_name in tl_load_used_var_names:
-                    # self.var_all_definitions = {'pid':.., 'grid_m':.., 'grid_n':.., 'width':..,
-                    #   'group_id':.., 'group_size':.., 'pid_m':.., 'pid_n':.., 'offset_am':..,
-                    #   'offset_bn':.., 'offset_k':.., 'a_desc':.., 'b_desc':.., 'c_desc':..,
-                    #   'acc':.., 'a':.., 'b':.., 'rm':.., 'rn':.., 'ram':.., 'rbn':..,
-                    #   'prev_multiple':.., 'rk':.., 'mask_k':.., 'offsets':.., 'mask':..}
-                    if var_name not in self.var_all_definitions:
-                        continue
-                    bs_names_set = self._extract_arange_bs_recursive(var_name)
-                    ts_names_set, _ = self.get_dependencies(var_name)
-                    # var_name = 'ram', bs_names_set = {'BLOCK_M'}, ts_names_set={'M'}
-                    # var_name = 'rk',  bs_names_set = {'BLOCK_K'}, ts_names_set={'K'}
-                    if len(bs_names_set) == 1 and len(ts_names_set) == 1:
-                        bs_name = bs_names_set.pop()
-                        ts_name = ts_names_set.pop()
-                        load_map[bs_name] = ts_name
-
-                for child in self._tl_load_expr_bfs_children(expr):
-                    if id(child) not in seen:
-                        queue.append(child)
-
+            # BLOCK_X referenced from this load address (via tl.arange chain)
+            used_bs = set[str]()
+            for var_name in VariableCollector.collect(addr_expr):
+                used_bs.update(self._extract_arange_bs_recursive(var_name))
+            # Look up X for each BLOCK_X via tl.cdiv(X, BLOCK_X)
+            for bs_name in used_bs:
+                ts_name = self._find_cdiv_x(bs_name)
+                if ts_name is not None:
+                    load_map[bs_name] = ts_name
+        if knobs.autotuning.print:
+            print(f"[Analyzer] load_map={load_map}")
         return load_map
 
     # Parse nargs["a_desc"].block_shape = [BLOCK_M, BLOCK_K] in a pre_hook
