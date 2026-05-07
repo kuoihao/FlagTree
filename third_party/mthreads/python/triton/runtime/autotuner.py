@@ -13,7 +13,7 @@ from .driver import driver
 from .adjust_kernel_param import auto_adjust_block_sizes
 
 # flagtree aabs
-adjust_block_size: bool = os.getenv("FLAGTREE_AABS", True)
+adjust_block_size: bool = os.getenv("FLAGTREE_AABS", "1").lower() not in ("0", "false")
 
 class Autotuner(KernelInterface):
 

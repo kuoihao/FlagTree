@@ -3,7 +3,7 @@ import inspect
 import os
 
 
-autotuning_print: bool = os.getenv("TRITON_PRINT_AUTOTUNING", False)
+autotuning_print: bool = os.getenv("TRITON_PRINT_AUTOTUNING", "1").lower() not in ("0", "false")
 
 
 # ========
