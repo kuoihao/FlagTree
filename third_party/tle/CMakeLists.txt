@@ -27,7 +27,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
     target_link_options(TritonTLE PUBLIC -Wl,--no-as-needed)
   else()
     target_link_libraries(TritonTLE PRIVATE Python3::Module pybind11::headers MLIRTargetLLVMIRImport)
-  endif() 
+  endif()
 endif()
 
 add_subdirectory(test)

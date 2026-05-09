@@ -373,12 +373,11 @@ LogicalResult lowerDeviceSpace(Location loc, ValueRange srcElems,
     return failure();
 
   auto isGlobalAddrSpace = [&](auto ptrTy) -> bool {
-    auto addrSpace = ptrTy.getAddressSpace(); 
-    return addrSpace ==
-           static_cast<unsigned>(NVVM::NVVMMemorySpace::Global);
+    auto addrSpace = ptrTy.getAddressSpace();
+    return addrSpace == static_cast<unsigned>(NVVM::NVVMMemorySpace::Global);
   };
 
-  if (!isGlobalAddrSpace(ptrTy)) 
+  if (!isGlobalAddrSpace(ptrTy))
     return failure();
 
   auto getPeerPtrCall = rewriter.create<LLVM::CallOp>(
@@ -388,7 +387,7 @@ LogicalResult lowerDeviceSpace(Location loc, ValueRange srcElems,
   Value peerPtr = getPeerPtrCall.getResult();
   auto peerPtrTy = dyn_cast<LLVM::LLVMPointerType>(peerPtr.getType());
 
-  if (!isGlobalAddrSpace(peerPtrTy)) 
+  if (!isGlobalAddrSpace(peerPtrTy))
     return failure();
 
   resultPtrs.push_back(peerPtr);
