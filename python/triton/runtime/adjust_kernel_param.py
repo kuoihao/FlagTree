@@ -474,8 +474,8 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
         return var_deps
 
     # Analyzer 3: tl.dot
-    def analyze_tma_dot_dim(self, tma_map: dict[str, set[tuple[str,
-                                                               ...]]]) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    def analyze_tma_dot_dim(
+            self, tma_map: dict[str, set[tuple[str, ...]]]) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
         # tma_map already stores the canonical block_shape per desc,
         # representing (M,K) or (K,N) in memory-layout order.
         # Map each dot operand var back to its desc_name (through desc.load
@@ -552,7 +552,7 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
 
     # Analyzer 4: tl.dot for general (non-TMA) kernels driven by tl.load.
     def analyze_general_dot_dim(
-            self, load_map: dict[str, str]) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+            self, load_map: dict[str, str]) -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, set[str]]]:
         """Map each `tl.dot` operand to (tensor_param, BLOCK_X set) using
         `tl.load` results. Parallel of `analyze_tma_dot_dim` for non-TMA paths.
 
@@ -571,7 +571,8 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
                - Resolve a -> (A, a_bs); b -> (B, b_bs).
                - K-block = a_bs ∩ b_bs (singleton expected -> shared K dim).
                - M-block = a_bs - b_bs (singleton expected -> a's M dim).
-               - m_map[M-block].add(A); k_map[K-block].add({A, B}).
+               - N-block = b_bs - a_bs (singleton expected -> b's N dim).
+               - m_map[M-block].add(A); k_map[K-block].add({A, B}); n_map[N-block].add(B).
 
         Example (mthreads mm_kernel)::
 
@@ -580,6 +581,7 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
             acc += tl.dot(a, b, ...)
             # -> m_map = {'BLOCK_M': {'A'}}
             # -> k_map = {'BLOCK_K': {'A', 'B'}}
+            # -> n_map = {'BLOCK_N': {'B'}}
         """
         valid_bs = set(load_map.keys())
 
@@ -626,6 +628,7 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
 
         m_map = dict[str, set[str]]()
         k_map = dict[str, set[str]]()
+        n_map = dict[str, set[str]]()
         for dot_node in self.dot_calls:
             args = dot_node.args
             if len(args) < 2:
@@ -634,19 +637,23 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
             b_param, b_bs = _resolve(args[1])
             if a_param is None or b_param is None or not a_bs or not b_bs:
                 continue
-            common = a_bs & b_bs       # K-block: shared between a and b
-            m_blocks = a_bs - common   # M-block: exclusive to a
-            if len(common) != 1 or len(m_blocks) != 1:
+            common = a_bs & b_bs  # K-block: shared between a and b
+            m_blocks = a_bs - common  # M-block: exclusive to a
+            n_blocks = b_bs - common  # N-block: exclusive to b
+            if len(common) != 1 or len(m_blocks) != 1 or len(n_blocks) != 1:
                 if knobs.autotuning.print:
-                    print(f"[Analyzer] Warning: ambiguous dim, common={common} m_only={m_blocks}")
-                return {}, {}
+                    print(f"[Analyzer] Warning: ambiguous dim, common={common} "
+                          f"m_only={m_blocks} n_only={n_blocks}")
+                return {}, {}, {}
             m_block = next(iter(m_blocks))
             k_block = next(iter(common))
+            n_block = next(iter(n_blocks))
             m_map.setdefault(m_block, set[str]()).add(a_param)
             k_map.setdefault(k_block, set[str]()).add(a_param)
             k_map.setdefault(k_block, set[str]()).add(b_param)
+            n_map.setdefault(n_block, set[str]()).add(b_param)
 
-        return m_map, k_map
+        return m_map, k_map, n_map
 
     def _find_cdiv_x(self, bs_name: str) -> str | None:
         for call in self.cdiv_calls:
@@ -897,10 +904,10 @@ def analyze_kernel_dependencies(jit_fn, pre_hook_fn: object | None = None) -> tu
         tma_map = analyzer.analyze_desc_load_bs(pre_hook_fn)  # a_desc: (BS_M, BS_K)
         # Analyzer 3: tl.dot M/N/K via tma_map
         tma_m_map, tma_k_map = analyzer.analyze_tma_dot_dim(tma_map)  # BS_M: {A}, BS_K: {A, B}
-        # Analyzer 4: tl.dot M/K via load_map
-        ge_m_map, ge_k_map = analyzer.analyze_general_dot_dim(load_map)  # BS_M: {A}, BS_K: {A, B}
+        # Analyzer 4: tl.dot M/N/K via load_map
+        ge_m_map, ge_k_map, ge_n_map = analyzer.analyze_general_dot_dim(load_map)  # BS_M: {A}, BS_K: {A, B}, BS_N: {B}
         # cache
-        _analysis_cache[cache_key] = (load_map, tma_map, tma_m_map, tma_k_map, ge_m_map, ge_k_map)
+        _analysis_cache[cache_key] = (load_map, tma_map, tma_m_map, tma_k_map, ge_m_map, ge_k_map, ge_n_map)
 
         if knobs.autotuning.print:
             jit_fn_name = getattr(jit_fn, '__name__', 'unknown')
@@ -916,17 +923,18 @@ def analyze_kernel_dependencies(jit_fn, pre_hook_fn: object | None = None) -> tu
                 print(f"\n=== [Analyzer] tma tl.dot: {jit_fn_name} ===")
                 print(f"  tma_m_map[bs_name, set[param_name]] = {tma_m_map}")
                 print(f"  tma_k_map[bs_name, set[param_name]] = {tma_k_map}")
-            if ge_m_map or ge_k_map:
+            if ge_m_map or ge_k_map or ge_n_map:
                 print(f"\n=== [Analyzer] general tl.dot: {jit_fn_name} ===")
                 print(f"  ge_m_map[bs_name, set[param_name]] = {ge_m_map}")
                 print(f"  ge_k_map[bs_name, set[param_name]] = {ge_k_map}")
+                print(f"  ge_n_map[bs_name, set[param_name]] = {ge_n_map}")
             print("==============================================================\n")
 
-        return (load_map, tma_map, tma_m_map, tma_k_map, ge_m_map, ge_k_map)
+        return (load_map, tma_map, tma_m_map, tma_k_map, ge_m_map, ge_k_map, ge_n_map)
 
     except Exception as e:
         print(f"Warning: adjust_kernel_param failed: {e}")
-        return (None, None, None, None)
+        return (None, None, None, None, None, None, None)
 
 
 def clear_analysis_cache():
@@ -1031,21 +1039,22 @@ def adjust_block_size_dot_m_dim(nargs, current, config, tma_k_map, tma_m_map, li
             update_bs(nargs, current, config, bs_name, limit, "tma tl.dot", f"< {limit}=limit_m")
 
 
-def adjust_block_size_general_dot_m_dim(nargs, current, config, ge_m_map, limit):
-    for bs_name in ge_m_map.keys():
+def adjust_block_size_general_dot_mn_dim(nargs, current, config, ge_mn_map, limit):
+    for bs_name in ge_mn_map.keys():
         if bs_name not in current:
             continue
         bs = current[bs_name]
         if not isinstance(bs, int):
             continue
         if bs < limit:
-            update_bs(nargs, current, config, bs_name, limit, "general tl.dot", f"< {limit}=limit_m")
+            update_bs(nargs, current, config, bs_name, limit, "general tl.dot", f"< {limit}=limit_m/n")
 
 
 # AABS
 def auto_adjust_block_sizes(nargs, fn, configs, current, config):
     pre_hook_fn = getattr(config, "pre_hook", None) or (configs[0].pre_hook if configs else None)
-    load_map, tma_map, tma_m_map, tma_k_map, ge_m_map, ge_k_map = analyze_kernel_dependencies(fn, pre_hook_fn=pre_hook_fn)
+    load_map, tma_map, tma_m_map, tma_k_map, ge_m_map, ge_k_map, ge_n_map = analyze_kernel_dependencies(
+        fn, pre_hook_fn=pre_hook_fn)
 
     if load_map:  # tl.load or tma_device.load
         if knobs.autotuning.print:
@@ -1066,11 +1075,12 @@ def auto_adjust_block_sizes(nargs, fn, configs, current, config):
         adjust_block_size_dot_k_dim(nargs, current, config, tma_k_map, 16)
         adjust_block_size_dot_m_dim(nargs, current, config, tma_k_map, tma_m_map, 128)
 
-    if ge_k_map or ge_m_map:  # tl.dot with general tl.load
+    if ge_m_map or ge_n_map:  # tl.dot with general tl.load
         if FLAGTREE_BACKEND == "hcu":
             if knobs.autotuning.print:
                 print("[AABS] 4. adjust bs in tl.dot with general tl.load")
-            adjust_block_size_general_dot_m_dim(nargs, current, config, ge_m_map, 16)
+            adjust_block_size_general_dot_mn_dim(nargs, current, config, ge_m_map, 16)
+            adjust_block_size_general_dot_mn_dim(nargs, current, config, ge_n_map, 16)
 
     if knobs.autotuning.print:
         nargs_str = ''
