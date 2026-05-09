@@ -1,6 +1,7 @@
 import ast
 import inspect
 from triton import knobs
+from triton._flagtree_backend import FLAGTREE_BACKEND
 
 # ========
 # Analyzer
@@ -989,7 +990,7 @@ def adjust_block_size_dot_k_dim(nargs, current, config, tma_k_map, limit):
         if not isinstance(bs, int):
             continue
         if bs < limit:
-            update_bs(nargs, current, config, bs_name, limit, "tl.dot", f"< {limit}=limit_k")
+            update_bs(nargs, current, config, bs_name, limit, "tma tl.dot", f"< {limit}=limit_k")
 
 
 def adjust_block_size_dot_m_dim(nargs, current, config, tma_k_map, tma_m_map, limit_bytes):
@@ -1027,7 +1028,7 @@ def adjust_block_size_dot_m_dim(nargs, current, config, tma_k_map, tma_m_map, li
         # SWIZZLE_128B: bs_k * elem_type_size = 128B, limit = 1
         limit = max(int(limit_bytes / bs_k / elem_type_size), 1)
         if bs < limit:
-            update_bs(nargs, current, config, bs_name, limit, "tl.dot", f"< {limit}=limit_m")
+            update_bs(nargs, current, config, bs_name, limit, "tma tl.dot", f"< {limit}=limit_m")
 
 
 def adjust_block_size_general_dot_m_dim(nargs, current, config, ge_m_map, limit):
@@ -1066,9 +1067,10 @@ def auto_adjust_block_sizes(nargs, fn, configs, current, config):
         adjust_block_size_dot_m_dim(nargs, current, config, tma_k_map, tma_m_map, 128)
 
     if ge_k_map or ge_m_map:  # tl.dot with general tl.load
-        if knobs.autotuning.print:
-            print("[AABS] 4. adjust bs in tl.dot with general tl.load")
-        adjust_block_size_general_dot_m_dim(nargs, current, config, ge_m_map, 16)
+        if FLAGTREE_BACKEND == "hcu":
+            if knobs.autotuning.print:
+                print("[AABS] 4. adjust bs in tl.dot with general tl.load")
+            adjust_block_size_general_dot_m_dim(nargs, current, config, ge_m_map, 16)
 
     if knobs.autotuning.print:
         nargs_str = ''
