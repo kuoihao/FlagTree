@@ -43,6 +43,18 @@ def NVWS_TokenLoadTypeAttr : I32EnumAttr<
       I32EnumAttrCase<"TMALoadOp", 2, "tmaLoadOp">,
       I32EnumAttrCase<"LocalStoreOp", 3, "localStoreOp">,
       I32EnumAttrCase<"TmemLoadOp", 4, "TmemLoadOp">,
+]>{
+  let cppNamespace = "::mlir::triton::nvws";
+}
+
+def NVWS_ProducerCommitKindAttr : I32EnumAttr<
+    "ProducerCommitKind", "",
+    [
+      I32EnumAttrCase<"BarrierArrive", 0, "barrier_arrive">,
+      I32EnumAttrCase<"AsyncCopyMbarrierArrive", 1,
+                      "async_copy_mbarrier_arrive">,
+      I32EnumAttrCase<"TmaCopyBarrierArrive", 2,
+                      "tma_copy_barrier_arrive">,
     ]>{
   let cppNamespace = "::mlir::triton::nvws";
 }

@@ -15,6 +15,7 @@
 #include "Utility.h"
 #ifdef __TLE__
 #include "tle/dialect/include/Conversion/TleToLLVM/RemotePointerUtils.h"
+#include "tle/dialect/include/Transforms/TransformAttrs.h"
 #endif
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
@@ -1713,7 +1714,10 @@ LogicalResult convertTMAStoreLikeOp(Operation *op,
 
   // TODO: Separate the syncronizations operations into separate TTGIR ops to
   // be able to schedule them at the high level.
-  NVVM::CpAsyncBulkCommitGroupOp::create(rewriter, loc);
+#ifdef __TLE__
+  if (!op->hasAttr(tte::kTleTMAStoreExplicitCommitAttr))
+#endif
+    NVVM::CpAsyncBulkCommitGroupOp::create(rewriter, loc);
 
   rewriter.eraseOp(op);
   return success();

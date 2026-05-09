@@ -186,6 +186,8 @@ struct ConvertTritonGPUToLLVM
           typeConverter, targetInfo, patterns, benefit);
       mlir::triton::tle::populateWGMMASharedOperandFenceOpToLLVMPatterns(
           typeConverter, patterns, benefit);
+      mlir::triton::tle::populateTMAStoreCommitGroupOpToLLVMPatterns(
+          typeConverter, patterns, benefit);
       if (failed(applyPartialConversion(mod, target, std::move(patterns)))) {
         return signalPassFailure();
       }

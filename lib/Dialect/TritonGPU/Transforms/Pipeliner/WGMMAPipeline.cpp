@@ -105,6 +105,42 @@ static bool hasAccumulatorPrewriteBeforeWait(scf::ForOp forOp,
   }
   return false;
 }
+
+static bool canDeferWaitToLaterWarpGroupDotC(ttng::WarpGroupDotOp dotOp,
+                                             scf::ForOp forOp) {
+  SmallVector<Value> queue = {dotOp.getResult()};
+  llvm::SmallDenseSet<Value, 8> visited;
+  bool hasLaterWarpGroupDotCUse = false;
+
+  while (!queue.empty()) {
+    Value value = queue.pop_back_val();
+    if (!visited.insert(value).second)
+      continue;
+
+    for (OpOperand &use : value.getUses()) {
+      Operation *user = use.getOwner();
+      if (user->getParentOp() != forOp)
+        return false;
+
+      if (isNoop(user)) {
+        if (user->getNumResults() != 1)
+          return false;
+        queue.push_back(user->getResult(0));
+        continue;
+      }
+
+      auto userDot = dyn_cast<ttng::WarpGroupDotOp>(user);
+      if (!userDot || use.getOperandNumber() != 2)
+        return false;
+      if (userDot->getBlock() != dotOp->getBlock() ||
+          !dotOp->isBeforeInBlock(userDot))
+        return false;
+      hasLaterWarpGroupDotCUse = true;
+    }
+  }
+
+  return hasLaterWarpGroupDotCUse;
+}
 #endif
 
 /// Find the minimum number of async_commit_group ops between the wait
@@ -496,6 +532,8 @@ static std::optional<int> dotCanBeProperlyAsync(ttng::WarpGroupDotOp dotOp,
         transitiveOperand =
             cast<scf::YieldOp>(blockArg.getOwner()->getTerminator())
                 .getOperand(blockArg.getArgNumber() - 1);
+      } else if (blockArg) {
+        break;
       } else if (Operation *def = transitiveOperand.getDefiningOp()) {
         transitiveOperand = def->getOperand(0);
       }
@@ -775,6 +813,14 @@ void triton::asyncLaunchDots(scf::ForOp forOp) {
   llvm::MapVector<Operation *, int /*iterArgIdx*/> properlyAsyncDots;
   for (auto WarpGroupDotOp : forOp.getBody()->getOps<ttng::WarpGroupDotOp>()) {
     WarpGroupDotOp.setIsAsync(true);
+#ifdef __TLE__
+    if (canDeferWaitToLaterWarpGroupDotC(WarpGroupDotOp, forOp)) {
+      LDBG("Deferring WGMMA wait because the result is only consumed by later "
+           "WGMMA ops as the accumulator: "
+           << WarpGroupDotOp);
+      continue;
+    }
+#endif
     if (auto iterArgIdx = dotCanBeProperlyAsync(WarpGroupDotOp, forOp)) {
       properlyAsyncDots[WarpGroupDotOp] = *iterArgIdx;
     } else {
