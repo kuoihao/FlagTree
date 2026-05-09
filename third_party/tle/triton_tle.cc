@@ -239,9 +239,12 @@ void init_triton_tle_ir(py::module &&m) {
           py::arg("group_kind"), py::arg("group_shape"), py::arg("group_axes"),
           py::arg("group_mask"))
       .def("create_remote_pointers",
-           [](TritonOpBuilder &self, Type resultTy, Value src,
-              Value shardId) -> OpState {
-             return self.create<tle::RemotePointersOp>(resultTy, src, shardId);
+           [](TritonOpBuilder &self, Type resultTy, Value src, Value shardId,
+              const std::string &space) -> OpState {
+             auto &builder = self.getBuilder();
+             auto space_attr = builder.getStringAttr(space);
+             return self.create<tle::RemotePointersOp>(resultTy, src, shardId,
+                                                       space_attr);
            })
       .def("get_memdesc_type",
            [](TritonOpBuilder &self, std::vector<int64_t> shape,

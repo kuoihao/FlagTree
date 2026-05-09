@@ -75,10 +75,13 @@ def get_hook_instance(hook_name):
 
 
 def enable_flagtree_third_party(name):
+    env_var = f"USE_{name.upper()}"
     if name in ["triton_shared"]:
-        return os.environ.get(f"USE_{name.upper()}", 'OFF') == 'ON'
+        os.environ.setdefault(env_var, 'OFF')
+        return os.environ.get(env_var) == 'ON'
     else:
-        return os.environ.get(f"USE_{name.upper()}", 'ON') == 'ON'
+        os.environ.setdefault(env_var, 'ON')
+        return os.environ.get(env_var) == 'ON'
 
 
 def download_flagtree_third_party(name, condition, required=False, hook=None):

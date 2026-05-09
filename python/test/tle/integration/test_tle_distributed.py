@@ -18,9 +18,9 @@ import triton
 import triton.language as tl
 import triton.experimental.tle.language as tle
 
-BLOCK_CLUSTER_MESH = tle.device_mesh({"block_cluster": [("cluster_x", 2)]})
+BLOCK_CLUSTER_MESH = tle.device_mesh(tle.MeshConfig(block_cluster=[("cluster_x", 2)]))
 BLOCK_CLUSTER_MESH_8 = tle.device_mesh({"block_cluster": [("cluster_x", 8)]})
-BLOCK_CLUSTER_MESH_2X2 = tle.device_mesh({"block_cluster": [("cluster_x", 2), ("cluster_y", 2)]})
+BLOCK_CLUSTER_MESH_2X2 = tle.device_mesh(tle.MeshConfig(block_cluster=[("cluster_x", 2), ("cluster_y", 2)]))
 BLOCK_GRID_MESH_8 = tle.device_mesh({"block": [("block_x", 8)]})
 BLOCK_CLUSTER_SUBMESH_ROW0 = BLOCK_CLUSTER_MESH_2X2[0, :]
 BLOCK_CLUSTER_SUBMESH_ROW1 = BLOCK_CLUSTER_MESH_2X2[1, :]

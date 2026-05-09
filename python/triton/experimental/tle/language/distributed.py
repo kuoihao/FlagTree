@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from itertools import product
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, List, Tuple, Union, Optional, Dict
+
+Axis = Tuple[str, int]
+AxesLike = Union[int, List[Axis]]
 
 import triton.language.core as tl
 
@@ -24,6 +27,34 @@ def _as_positive_int(value: Any, label: str) -> int:
     return value
 
 
+@dataclass
+class MeshConfig:
+    """
+    Represents a hierarchical mesh topology configuration.
+
+    Fields:
+        node:          Inter-node topology (e.g., multi-host layout)
+        device:        Intra-node device topology (e.g., GPUs per node)
+        block_cluster: Cluster-level partitioning within a device
+        block:         Finest-grained block-level partitioning
+
+    Fields set to None are ignored when exporting.
+    """
+    node: Optional[AxesLike] = None
+    device: Optional[AxesLike] = None
+    block_cluster: Optional[AxesLike] = None
+    block: Optional[AxesLike] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        _dict = asdict(self)
+        _dict = {k: v for k, v in _dict.items() if v is not None}
+        return _dict
+
+    def __repr__(self) -> str:
+        fields = ", ".join(f"{k}={v}" for k, v in self.to_dict().items())
+        return f"MeshConfig({fields})"
+
+
 class device_mesh:
     """
     Logical view of a physical device topology.
@@ -31,7 +62,7 @@ class device_mesh:
 
     def __init__(
         self,
-        topology: Mapping[str, Any] | None = None,
+        topology: Mapping[str, Any] | MeshConfig | None = None,
         *,
         _shape: Sequence[int] | None = None,
         _dim_names: Sequence[str] | None = None,
@@ -49,10 +80,13 @@ class device_mesh:
             self._launch_dim_names = tuple(_launch_dim_names if _launch_dim_names is not None else _dim_names)
             return
 
-        if not isinstance(topology, Mapping):
-            raise TypeError(f"topology must be a mapping, got {type(topology).__name__}")
+        if not isinstance(topology, Mapping) and not isinstance(topology, MeshConfig):
+            raise TypeError(f"topology must be a Mapping or MeshConfig, got {type(topology).__name__}")
         if not topology:
             raise ValueError("topology cannot be empty")
+
+        if isinstance(topology, MeshConfig):
+            topology = topology.to_dict()
 
         shape = []
         dim_names = []
@@ -680,6 +714,7 @@ def _create_remote_pointers_tensor(
     tensor: tl.tensor,
     shard_id_tensor: tl.tensor,
     _semantic,
+    space: str = "cluster",
 ) -> tl.tensor:
     builder = _semantic.builder
     if not tensor.dtype.is_ptr():
@@ -691,11 +726,9 @@ def _create_remote_pointers_tensor(
         remote_type = tl.block_type(remote_ptr_dtype, list(tensor.shape)).to_ir(builder)
     else:
         remote_type = remote_ptr_dtype.to_ir(builder)
-    remote_op = builder.create_remote_pointers(
-        remote_type,
-        tensor.handle,
-        shard_id_tensor.handle,
-    )
+
+    remote_op = builder.create_remote_pointers(remote_type, tensor.handle, shard_id_tensor.handle, space)
+
     if tensor.type.is_block():
         return tl.tensor(remote_op.get_result(0), tl.block_type(remote_ptr_dtype, list(tensor.shape)))
     return tl.tensor(remote_op.get_result(0), remote_ptr_dtype)
@@ -704,6 +737,7 @@ def _create_remote_pointers_tensor(
 def _remote_pointer(
     tensor: tl.tensor,
     shard_id,
+    space: str = "cluster",
     scope: device_mesh | None = None,
     _semantic=None,
 ) -> tl.tensor:
@@ -724,20 +758,19 @@ def _remote_pointer(
     if tensor.dtype.address_space != 3:
         raise ValueError("remote(pointer, ...) internal path requires shared-memory pointers (addrspace=3) "
                          "or cluster-shared pointers (addrspace=7)")
-
     # Compile-time constant shard id path.
     if isinstance(shard_id, (int, tuple, list)):
         linear_shard_id = _normalize_compile_time_remote_shard_id(shard_id, scope)
         shard_id_tensor = _semantic.to_tensor(int(linear_shard_id))
         shard_id_tensor = _normalize_runtime_remote_shard_id_tensor(shard_id_tensor)
-        return _create_remote_pointers_tensor(tensor, shard_id_tensor, _semantic)
+        return _create_remote_pointers_tensor(tensor, shard_id_tensor, _semantic, space)
 
     # Runtime shard id path. This materializes a TLE op that carries the
     # runtime i32 shard id through lowering.
     shard_id_tensor = shard_id if isinstance(shard_id, tl.tensor) else _semantic.to_tensor(shard_id)
     shard_id_tensor = _normalize_runtime_remote_shard_id_tensor(shard_id_tensor)
 
-    return _create_remote_pointers_tensor(tensor, shard_id_tensor, _semantic)
+    return _create_remote_pointers_tensor(tensor, shard_id_tensor, _semantic, space)
 
 
 @tl.builtin
@@ -745,6 +778,7 @@ def remote(
     tensor,
     shard_id,
     scope: device_mesh | None = None,
+    space: str = "cluster",
     _semantic=None,
 ):
     """
@@ -770,7 +804,7 @@ def remote(
     # Direct pointer path: support local_ptr scalar/tensor values and return
     # remote pointer with preserved shape.
     if isinstance(tensor, tl.tensor):
-        return _remote_pointer(tensor, shard_id, scope=scope, _semantic=_semantic)
+        return _remote_pointer(tensor, shard_id, scope=scope, space=space, _semantic=_semantic)
 
     # Buffered tensor path: carry remote metadata and let `local_ptr` materialize
     # remote pointers later.
