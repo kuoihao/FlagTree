@@ -146,11 +146,13 @@ class Autotuner(KernelInterface):
         current = dict(meta, **config.all_kwargs())
         # flagtree aabs: auto_adjust_block_sizes
         if knobs.autotuning.adjust_block_size:
+
             def _unwrap_to_jitfunction(fn):
                 from triton.runtime.jit import JITFunction
                 while not isinstance(fn, JITFunction):
                     fn = fn.fn
                 return fn
+
             auto_adjust_block_sizes(self.nargs, _unwrap_to_jitfunction(self.fn), self.configs, current, config)
         meta_key = tuple(sorted(current.items()))
         if meta_key in self.seen_tuned_metas:

@@ -282,8 +282,7 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
         if hasattr(helper_obj, 'parse') and callable(helper_obj.parse):
             try:
                 tree = helper_obj.parse()
-                if (isinstance(tree, ast.Module) and tree.body
-                        and isinstance(tree.body[0], ast.FunctionDef)):
+                if (isinstance(tree, ast.Module) and tree.body and isinstance(tree.body[0], ast.FunctionDef)):
                     return tree.body[0]
             except Exception:
                 pass
