@@ -1,23 +1,33 @@
 import triton.language as tl
 from triton.language import semantic, core, standard
-from triton.language.core import (_constexpr_to_value, _tensor_member_fn, _unwrap_iterable, builtin, constexpr, dtype,
-                                  tensor, check_bit_width, _unwrap_if_constexpr, range)
+from triton.language.core import (
+    _constexpr_to_value,
+    _tensor_member_fn,
+    _unwrap_iterable,
+    builtin,
+    constexpr,
+    dtype,
+    tensor,
+    check_bit_width,
+    _unwrap_if_constexpr,
+    range
+)
 from triton.language.semantic import (
-    wrap_tensor,
-    _str_to_rounding_mode,
-    not_equal,
+    wrap_tensor, 
+    _str_to_rounding_mode, 
+    not_equal, 
     _str_to_dot_input_precision,
-    binary_op_type_checking_impl,
-    integer_promote_impl,
-    broadcast_impl_shape,
-    _str_to_sem,
-    _str_to_scope,
+    binary_op_type_checking_impl, 
+    integer_promote_impl, 
+    broadcast_impl_shape, 
+    _str_to_sem, 
+    _str_to_scope, 
     bitcast,
     bitwise_op_type_checking_impl,
-    to_tensor,
-    _str_to_load_cache_modifier,
+    to_tensor, 
+    _str_to_load_cache_modifier, 
     _str_to_eviction_policy,
-    _str_to_padding_option,
+    _str_to_padding_option, 
     _canonicalize_boundary_check,
 )
 
@@ -57,10 +67,8 @@ def sync_block_set(sender, receiver, event_id, _builder=None):
     sender = _constexpr_to_value(sender)
     receiver = _constexpr_to_value(receiver)
     event_id = _constexpr_to_value(event_id)
-    assert isinstance(sender, str) and (sender == "cube"
-                                        or sender == "vector"), f"ERROR: sender = {sender}, only supports cube/vector"
-    assert isinstance(receiver, str) and (receiver == "cube" or receiver
-                                          == "vector"), f"ERROR: receiver = {receiver}, only supports cube/vector"
+    assert isinstance(sender, str) and (sender == "cube" or sender == "vector"), f"ERROR: sender = {sender}, only supports cube/vector"
+    assert isinstance(receiver, str) and (receiver == "cube" or receiver == "vector"), f"ERROR: receiver = {receiver}, only supports cube/vector"
     assert isinstance(event_id, int) and (event_id >= 0) and (event_id < 16), f"event_id: {event_id} should be 0 ~ 15"
     if sender == receiver:
         raise ValueError(f'Unexpected pair: {sender} -> {receiver}, only supports cube -> vector or vector -> cube')
@@ -80,10 +88,8 @@ def sync_block_wait(sender, receiver, event_id, _builder=None):
     sender = _constexpr_to_value(sender)
     receiver = _constexpr_to_value(receiver)
     event_id = _constexpr_to_value(event_id)
-    assert isinstance(sender, str) and (sender == "cube"
-                                        or sender == "vector"), f"ERROR: sender = {sender}, only supports cube/vector"
-    assert isinstance(receiver, str) and (receiver == "cube" or receiver
-                                          == "vector"), f"ERROR: receiver = {receiver}, only supports cube/vector"
+    assert isinstance(sender, str) and (sender == "cube" or sender == "vector"), f"ERROR: sender = {sender}, only supports cube/vector"
+    assert isinstance(receiver, str) and (receiver == "cube" or receiver == "vector"), f"ERROR: receiver = {receiver}, only supports cube/vector"
     assert isinstance(event_id, int) and (event_id >= 0) and (event_id < 16), f"event_id: {event_id} should be 0 ~ 15"
     if sender == receiver:
         raise ValueError(f'Unexpected pair: {sender} -> {receiver}, only supports cube -> vector or vector -> cube')
@@ -100,9 +106,7 @@ class parallel(range):
         This is used in the mixed cube-vector kernel on 910B. The number of vector cores is determined by the number of
         iteration in this loop. Currently on 910B, max 2 vector cores could be used.
     """
-
-    def __init__(self, arg1, arg2=None, step=None, num_stages=None, loop_unroll_factor=None,
-                 bind_sub_block: bool = False):
+    def __init__(self, arg1, arg2=None, step=None, num_stages=None, loop_unroll_factor=None, bind_sub_block: bool = False):
         super().__init__(arg1, arg2, step, num_stages, loop_unroll_factor)
         self.bind_sub_block = bind_sub_block
 
@@ -112,10 +116,11 @@ def compile_hint_impl(ptr: tensor, hint_name: str, hint_val, builder: ir.builder
     # FIXME: is_simt_mode
     # if builder.is_simt_mode():
     #     return
-    if not hint_val:
-        hint_val = builder.get_unit_attr()
-    elif isinstance(hint_val, bool):
+    # Check isinstance(hint_val, bool) first to handle False explicitly
+    if isinstance(hint_val, bool):
         hint_val = builder.get_bool_attr(hint_val)
+    elif not hint_val:
+        hint_val = builder.get_unit_attr()
     elif isinstance(hint_val, int):
         hint_val = builder.get_int32_attr(hint_val)
     elif isinstance(hint_val, core.constexpr):
@@ -125,8 +130,7 @@ def compile_hint_impl(ptr: tensor, hint_name: str, hint_val, builder: ir.builder
         hint_val = builder.get_i64_array_attr(hint_val)
     else:
         raise ValueError(f"Unsupported hint value type: {type(hint_val)}")
-    builder.create_annotation(ptr.handle, hint_name, hint_val)
-
+    builder.create_annotation_mark(ptr.handle, hint_name, hint_val)
 
 @builtin
 def compile_hint(ptr, hint_name, hint_val=None, _builder=None):
@@ -146,7 +150,6 @@ def compile_hint(ptr, hint_name, hint_val=None, _builder=None):
     hint_val = _unwrap_if_constexpr(hint_val) if hint_val else hint_val
     compile_hint_impl(ptr, hint_name, hint_val, _builder)
 
-
 @builtin
 def multibuffer(src: tensor, size, _builder=None):
     """
@@ -156,4 +159,4 @@ def multibuffer(src: tensor, size, _builder=None):
     """
     buffer_size = _constexpr_to_value(size)
     assert isinstance(buffer_size, int) and buffer_size == 2, f"only support bufferize equals 2"
-    compile_hint_impl(src, "multi_buffer", buffer_size, _builder)
+    compile_hint_impl(src, "hivm.multi_buffer", buffer_size, _builder)
