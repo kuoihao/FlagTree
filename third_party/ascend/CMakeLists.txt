@@ -12,20 +12,9 @@ include_directories(${CMAKE_BINARY_DIR}/third_party/flir/include)
 # set(BISHENGIR_ENABLE_A5_UNPUBLISHED_FEATURES ON)
 # set(BISHENGIR_BUILD_STANDALONE_IR_ONLY ON)
 
-# Temporarily save and clear the RULE_LAUNCH_* attributes in the current directory to ensure AscendNPU-IR is not affected.
-get_property(_saved_launch_compile DIRECTORY PROPERTY RULE_LAUNCH_COMPILE)
-get_property(_saved_launch_link DIRECTORY PROPERTY RULE_LAUNCH_LINK)
-set_property(DIRECTORY PROPERTY RULE_LAUNCH_COMPILE "")
-set_property(DIRECTORY PROPERTY RULE_LAUNCH_LINK "")
-
-add_subdirectory(${ASCENDNPU_IR_SRC_DIR} ${ASCENDNPU_IR_BINARY_DIR})
-
-# restore properties
-set_property(DIRECTORY PROPERTY RULE_LAUNCH_COMPILE ${_saved_launch_compile})
-set_property(DIRECTORY PROPERTY RULE_LAUNCH_LINK ${_saved_launch_link})
-
-include_directories(${ASCENDNPU_IR_SRC_DIR}/bishengir/include)
-include_directories(${ASCENDNPU_IR_BINARY_DIR}/bishengir/include) # Tablegen'd files
+# AscendNPU-IR is already added from the top-level CMakeLists when
+# FLAGTREE_BACKEND=ascend. Do not add it again here, otherwise CMake will
+# fail with "binary directory is already used to build a source directory".
 
 add_subdirectory(backend/spec/lib)
 
