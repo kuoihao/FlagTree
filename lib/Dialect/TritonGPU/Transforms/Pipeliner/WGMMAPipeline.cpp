@@ -2,6 +2,9 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Support/LLVM.h"
+#ifdef __TLE__
+#include "nvidia/include/Dialect/NVWS/IR/Dialect.h"
+#endif
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -30,6 +33,9 @@ using namespace mlir;
 namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
 namespace ttng = mlir::triton::nvidia_gpu;
+#ifdef __TLE__
+namespace ttnvws = mlir::triton::nvws;
+#endif
 
 #ifdef __TLE__
 static constexpr llvm::StringLiteral
@@ -688,6 +694,31 @@ static std::optional<int> dotCanBeProperlyAsync(ttng::WarpGroupDotOp dotOp,
   return std::nullopt;
 }
 
+#ifdef __TLE__
+static bool hasSharedMemDescOperand(ttng::WarpGroupDotOp dotOp) {
+  return isa<ttg::MemDescType>(dotOp.getA().getType()) ||
+         isa<ttg::MemDescType>(dotOp.getB().getType());
+}
+
+static bool
+hasTlePipeLifetimeBoundaryBeforeFullWgmmaWait(ttng::WarpGroupDotOp dotOp) {
+  if (!hasSharedMemDescOperand(dotOp))
+    return false;
+
+  for (Operation *op = dotOp->getNextNode(); op; op = op->getNextNode()) {
+    if (auto wait = dyn_cast<ttng::WarpGroupDotWaitOp>(op)) {
+      if (wait.getPendings() == 0)
+        return false;
+    }
+    if (isa<ttnvws::ConsumerReleaseOp, ttng::ArriveBarrierOp>(op))
+      return true;
+    if (op->hasTrait<OpTrait::IsTerminator>())
+      return false;
+  }
+  return false;
+}
+#endif
+
 // If necessary, insert a dot-wait inside the loop, waiting for the results of
 // the properly-async dots from iteration i-1 to complete.  (We pipeline to
 // depth 2, so there are at most 2 copies of each warp_group_dot in flight at a
@@ -814,6 +845,18 @@ void triton::asyncLaunchDots(scf::ForOp forOp) {
   for (auto WarpGroupDotOp : forOp.getBody()->getOps<ttng::WarpGroupDotOp>()) {
     WarpGroupDotOp.setIsAsync(true);
 #ifdef __TLE__
+    if (hasTlePipeLifetimeBoundaryBeforeFullWgmmaWait(WarpGroupDotOp)) {
+      LDBG("Can't defer WGMMA wait across a pipe reader release lifetime "
+           "boundary: "
+           << WarpGroupDotOp);
+      builder.setInsertionPointAfter(WarpGroupDotOp);
+      auto wait = ttng::WarpGroupDotWaitOp::create(
+          builder, WarpGroupDotOp.getLoc(), ArrayRef<Value>{},
+          /*pendings=*/0);
+      SmallVector<Value> waitOperands = {WarpGroupDotOp.getResult()};
+      threadValuesThroughWait(wait, waitOperands);
+      continue;
+    }
     if (canDeferWaitToLaterWarpGroupDotC(WarpGroupDotOp, forOp)) {
       LDBG("Deferring WGMMA wait because the result is only consumed by later "
            "WGMMA ops as the accumulator: "

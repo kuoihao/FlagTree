@@ -278,14 +278,14 @@ class buffered_tensor(tl.base_value):
     """
 
     def __init__(self, handle, element_ty: tl.dtype, shape: List, storage: scope,
-                 layout: Optional[shared_layout] = None, semantic: TritonSemantic = None):
+                 layout: Optional[shared_layout] = None, semantic: TritonSemantic = None, alloc_shape: List = None):
         """Not called by user code."""
         super().__init__()
         # IR handle
         self.handle = handle
         # Block shape
         self.shape = shape
-        self.type = buffered_tensor_type(element_ty, shape, storage, layout, semantic)
+        self.type = buffered_tensor_type(element_ty, shape, storage, layout, semantic, alloc_shape=alloc_shape)
         # Following the practice in pytorch, dtype is scalar type
         self.dtype = element_ty
 
@@ -310,10 +310,12 @@ class buffered_tensor(tl.base_value):
 
         slot_shape = list(self.shape[1:])
         slot_layout = _make_slot_layout(self.type.layout, slot_shape)
-        slot_ty = buffered_tensor_type(self.dtype, slot_shape, self.type.storage, slot_layout, _semantic)
+        slot_ty = buffered_tensor_type(self.dtype, slot_shape, self.type.storage, slot_layout, _semantic,
+                                       alloc_shape=slot_shape)
         slot_handle = _semantic.builder.create_memdesc_index(slot_ty.to_ir(_semantic.builder), self.handle,
                                                              stage_tensor.handle)
-        return buffered_tensor(slot_handle, self.dtype, slot_shape, self.type.storage, slot_layout, _semantic)
+        return buffered_tensor(slot_handle, self.dtype, slot_shape, self.type.storage, slot_layout, _semantic,
+                               alloc_shape=slot_ty.alloc_shape)
 
     def make_permute(self, handle, dims):
         permuted_layout = self.type.layout.make_permute(dims)
@@ -330,18 +332,20 @@ class buffered_tensor(tl.base_value):
 class buffered_tensor_type(tl.block_type):
 
     def __init__(self, element_ty: tl.dtype, shape: List, storage: scope, layout: Optional[shared_layout] = None,
-                 semantic: TritonSemantic = None):
+                 semantic: TritonSemantic = None, alloc_shape: List = None):
         super().__init__(element_ty, shape)
         # Storage
         self.storage = storage
         # layout encoding
         self.layout = layout
+        self.alloc_shape = list(shape if alloc_shape is None else alloc_shape)
         # Buffer number. 0 means a single buffer, 1+ means a buffer array.
         assert semantic, "buffered_tensor array must be created with a builder"
         self.semantic = semantic
 
     def _unflatten_ir(self, handles: List[ir.value], cursor: int) -> Tuple[buffered_tensor, int]:
-        value = buffered_tensor(handles[cursor], self.scalar, self.shape, self.storage, self.layout, self.semantic)
+        value = buffered_tensor(handles[cursor], self.scalar, self.shape, self.storage, self.layout, self.semantic,
+                                alloc_shape=self.alloc_shape)
         if hasattr(self, "_tle_remote_shard_id"):
             shard_id = getattr(self, "_tle_remote_shard_id")
             scope = getattr(self, "_tle_remote_scope", None)
@@ -354,6 +358,10 @@ class buffered_tensor_type(tl.block_type):
     def mangle(self) -> str:
         elt = self.scalar.mangle()
         shape = '_'.join(map(str, self.shape))
+        alloc_suffix = ""
+        if self.alloc_shape != self.shape:
+            alloc_shape = '_'.join(map(str, self.alloc_shape))
+            alloc_suffix = f"A{alloc_shape}"
         remote_suffix = ""
         shard_id = getattr(self, "_tle_remote_shard_id", None)
         if shard_id is not None:
@@ -361,13 +369,14 @@ class buffered_tensor_type(tl.block_type):
                 remote_suffix = f"_R{shard_id}"
             else:
                 remote_suffix = "_Rdyn"
-        return f'buffered_{elt}S{shape}{remote_suffix}'
+        return f'buffered_{elt}S{shape}{alloc_suffix}{remote_suffix}'
 
     def __str__(self) -> str:
-        return f"buffered_tensor_<{self.element_ty}, {self.shape}, {self.layout}, >"
+        return f"buffered_tensor_<{self.element_ty}, {self.shape}, {self.layout}, {self.alloc_shape}, >"
 
     def __eq__(self, other) -> bool:
-        if not (type(self) is type(other) and self.shape == other.shape and self.layout == other.layout):
+        if not (type(self) is type(other) and self.shape == other.shape and self.layout == other.layout
+                and self.alloc_shape == other.alloc_shape):
             return False
         self_shard = getattr(self, "_tle_remote_shard_id", None)
         other_shard = getattr(other, "_tle_remote_shard_id", None)
@@ -404,6 +413,7 @@ class buffered_tensor_type(tl.block_type):
             self.element_ty.to_ir(builder),
             self.layout.to_ir(builder),
             _storage_to_memdesc_space(self.storage),
+            self.alloc_shape,
         )
 
     def _flatten_ir(self, handles) -> None:
@@ -763,13 +773,18 @@ class pipe_reader(_pipe_endpoint):
 
     type_cls = pipe_reader_type
 
+    def _reader_field_names(self):
+        if self.field_names is None:
+            return self.pipe._field_names()
+        return list(self.field_names)
+
     @tl.builtin
     def wait(self, iter, _semantic=None):
         stage, phase = self.pipe._stage_phase(iter, _semantic=_semantic)
         is_closed = _semantic.builder.create_pipe_reader_wait(self.pipe._field_handles(), stage.handle,
                                                               phase.handle, self.pipe.capacity, self.pipe.scope,
                                                               self.pipe._ir_name(), self.pipe._field_names(),
-                                                              self.reader_name or "")
+                                                              self.reader_name or "", self._reader_field_names())
         slot = self.pipe._make_slot(stage, _semantic=_semantic, field_names=self.field_names)
         return pipe_wait_result(slot, tl.tensor(is_closed, tl.int1))
 
@@ -778,7 +793,7 @@ class pipe_reader(_pipe_endpoint):
         stage, _ = self.pipe._stage_phase(iter, _semantic=_semantic)
         _semantic.builder.create_pipe_reader_release(self.pipe._field_handles(), stage.handle, self.pipe.capacity,
                                                      self.pipe.scope, self.pipe._ir_name(), self.pipe._field_names(),
-                                                     self.reader_name or "")
+                                                     self.reader_name or "", self._reader_field_names())
 
 
 pipe_writer_type.value_cls = pipe_writer

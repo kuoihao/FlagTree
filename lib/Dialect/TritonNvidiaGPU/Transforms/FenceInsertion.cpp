@@ -134,6 +134,50 @@ private:
     }
   }
 
+#ifdef __TLE__
+  void findLocalStoresThroughMemDescViews(Value value,
+                                          DenseSet<Value> &visitedValues,
+                                          llvm::SetVector<Operation *> &result) {
+    if (!visitedValues.insert(value).second)
+      return;
+    for (Operation *user : value.getUsers()) {
+      if (isa<ttg::LocalStoreOp>(user)) {
+        result.insert(user);
+        continue;
+      }
+      if (user->hasTrait<OpTrait::MemDescViewTrait>()) {
+        for (Value viewResult : user->getResults())
+          findLocalStoresThroughMemDescViews(viewResult, visitedValues, result);
+      }
+    }
+  }
+
+  void findLocalStoresInRegionThroughMemDescViews(
+      Value value, Region *region, llvm::SetVector<Operation *> &result) {
+    llvm::SetVector<Value> aliases;
+    aliases.insert(value);
+
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      region->walk([&](Operation *op) {
+        if (!op->hasTrait<OpTrait::MemDescViewTrait>())
+          return;
+        if (!llvm::any_of(op->getOperands(),
+                          [&](Value operand) { return aliases.count(operand); }))
+          return;
+        for (Value viewResult : op->getResults())
+          changed |= aliases.insert(viewResult);
+      });
+    }
+
+    region->walk([&](ttg::LocalStoreOp store) {
+      if (aliases.count(store.getDst()))
+        result.insert(store);
+    });
+  }
+#endif
+
   bool valueDefinedInside(Value value, Operation *ancestor) const {
     if (Operation *def = value.getDefiningOp())
       return ancestor == def || ancestor->isAncestor(def);
@@ -196,6 +240,13 @@ private:
         if (localAlloc.getSrc()) {
           result.insert(op);
         }
+#ifdef __TLE__
+        DenseSet<Value> visitedStoreValues;
+        findLocalStoresThroughMemDescViews(localAlloc.getResult(),
+                                           visitedStoreValues, result);
+        if (!result.empty())
+          return;
+#endif
         // Check if there are local_store ops that write to that buffer.
         for (auto user : localAlloc.getResult().getUsers()) {
           while (user->hasOneUse() &&
@@ -224,6 +275,14 @@ private:
 
     // reach BlockArgument
     BlockArgument arg = cast<BlockArgument>(operand);
+#ifdef __TLE__
+    DenseSet<Value> visitedStoreValues;
+    findLocalStoresThroughMemDescViews(arg, visitedStoreValues, result);
+    findLocalStoresInRegionThroughMemDescViews(arg, arg.getOwner()->getParent(),
+                                               result);
+    if (!result.empty())
+      return;
+#endif
     unsigned argNum = arg.getArgNumber();
     Operation *argOwner = arg.getOwner()->getParentOp();
     // look through ForOp iter argument

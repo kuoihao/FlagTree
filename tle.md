@@ -1044,6 +1044,71 @@ Performance comparison (TFLOPS):
 | H20 | - | 81.0 | **110.2** | 93.2 | 1.15x |
 | RTX 5060Ti | - | 30.7 | Not supported | **32.8** | 1.07x |
 
+#### 4.1.1 DeepSeek V3.2 SparseMLA Prefill
+
+Current `feature/tle-pipe` benchmark on H800, commit `2c3c2966e`, using:
+
+```bash
+TRITON_CACHE_DIR=/tmp/tle_doc_prefill_bench_cache \
+conda run -n flagtree python python/tutorials/tle/deepseek_v32/02-sparse-mla.py \
+  --mode bench --warmup 200 --rep 500
+```
+
+The cases match the FlashMLA V3.2 sparse prefill performance fixture, with `attn_sink` omitted because the local Triton, TLE, and TileLang kernels do not implement it:
+`B=1`, `S=4096`, `H=128`, `HKV=1`, `DQK=576`, `DV=512`, `topk=2048`.
+
+Latency in milliseconds:
+
+| SKV | Triton | TLE | TLE-Pipe-Pipelined | TileLang | TileLang-Pipelined | TileLang-Seesaw | FlashMLA |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8192 | 11.010 | 7.514 | 4.726 | 62.505 | 5.437 | 5.199 | **3.853** |
+| 32768 | 12.278 | 8.257 | 5.247 | 77.139 | 6.596 | 5.546 | **4.083** |
+| 65536 | 12.670 | 8.817 | 5.739 | 85.101 | 7.039 | 5.779 | **4.330** |
+| 98304 | 12.820 | 9.120 | 5.935 | 86.633 | 7.186 | 5.892 | **4.456** |
+| 131072 | 12.898 | 9.306 | 6.122 | 87.483 | 7.197 | 5.852 | **4.556** |
+
+Speedup summary:
+
+| SKV | TLE-Pipe over Triton | TLE-Pipe over TileLang-Pipelined | FlashMLA over TLE-Pipe |
+| ---: | ---: | ---: | ---: |
+| 8192 | 2.33x | 1.15x | 1.23x |
+| 32768 | 2.34x | 1.26x | 1.28x |
+| 65536 | 2.21x | 1.23x | 1.33x |
+| 98304 | 2.16x | 1.21x | 1.33x |
+| 131072 | 2.11x | 1.18x | 1.34x |
+
+#### 4.1.2 DeepSeek V3.2 SparseMLA Decode
+
+Current `feature/tle-pipe` benchmark on H800, commit `2c3c2966e`, using:
+
+```bash
+TRITON_CACHE_DIR=/tmp/tle_doc_decode_bench_cache \
+conda run -n flagtree python python/tutorials/tle/deepseek_v32/02-sparse-mla.py \
+  --mode bench-decode --warmup 200 --rep 500
+```
+
+The cases match the FlashMLA V3.2 sparse decode production fixture:
+`S=2`, `SKV=32768`, `H=128`, `HKV=1`, `DQK=576`, `DV=512`, `topk=2048`, `block_size=64`, `is_varlen=True`.
+FlashMLA runs the FP8 quantized cache path; Triton, TLE, and TileLang run on the same dequantized flat KV data derived from that fixture.
+
+Latency in milliseconds:
+
+| B | Triton | TLE | TLE-Pipe-Pipelined | TileLang | TileLang-Pipelined | TileLang-Seesaw | FlashMLA |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 0.208 | 0.140 | **0.082** | 1.480 | 0.108 | 0.114 | 0.025 |
+| 64 | 0.439 | 0.343 | 0.235 | 2.921 | **0.211** | 0.225 | 0.179 |
+| 74 | 0.639 | 0.483 | 0.316 | 4.281 | **0.290** | 0.310 | 0.218 |
+| 128 | 0.856 | 0.669 | 0.460 | 5.762 | **0.380** | 0.404 | 0.350 |
+
+Speedup summary:
+
+| B | TLE-Pipe over Triton | TLE-Pipe over TileLang-Pipelined | FlashMLA over TLE-Pipe |
+| ---: | ---: | ---: | ---: |
+| 2 | 2.55x | 1.32x | 3.23x |
+| 64 | 1.86x | 0.90x | 1.31x |
+| 74 | 2.02x | 0.92x | 1.45x |
+| 128 | 1.86x | 0.83x | 1.31x |
+
 ### 4.2 MoeAlignBlockSize
 
 With shared-memory extensions in `tle-struct`, it is possible to implement `vllm/sglang`-style `moe_align_block_size` and improve performance.

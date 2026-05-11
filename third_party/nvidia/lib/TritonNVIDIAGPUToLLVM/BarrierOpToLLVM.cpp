@@ -235,6 +235,10 @@ struct ArriveBarrierOpConversion
                   ConversionPatternRewriter &rewriter) const override {
     // TODO: Add phase result as needed.
     std::stringstream ptxAsm;
+#ifdef __TLE__
+    if (op.getReleaseFence())
+      ptxAsm << "membar.cta;\n";
+#endif
     ptxAsm << "@$0 mbarrier.arrive.shared::cta.b64 _, [$1]";
     if (op.getCount() > 1) {
       ptxAsm << ", " << op.getCount();

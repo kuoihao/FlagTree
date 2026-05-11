@@ -226,6 +226,50 @@ def TTNG_WaitBarrierOp : TTNG_Op<"wait_barrier", [AttrSizedOperandSegments]> {
   let hasVerifier = 1;
 }
 
+#ifdef __TLE__
+def TTNG_ArriveBarrierOp : TTNG_Op<"arrive_barrier"> {
+  let summary = "perform the arrive operation on an mbarrier";
+  let description = [{
+    The `ttng.arrive_barrier` operation performs the "arrive" operation on an
+    mbarrier object in shared memory. The operation requires a `count` attribute
+    of at least 1, and decreasing the pending arrival count of the mbarrier by
+    the specific count.
+
+    The operation accepts an optional predicate. When `release_fence` is set,
+    all threads in the current warp-specialized partition perform a CTA-scope
+    release fence before the single elected thread arrives at the mbarrier.
+
+    Example:
+
+    ```mlir
+    ttng.arrive_barrier %barrier, 2 : !ttg.memdesc<1xi64, #shared, #smem, mutable>
+    ttng.arrive_barrier %barrier, 1, %pred : !ttg.memdesc<1xi64, #shared, #smem, mutable>
+    ```
+  }];
+
+  let arguments = (ins
+    Arg<TTG_MemDescType, "", [MemRead<SharedMemory>, MemWrite<SharedMemory>]>:$alloc,
+    I32Attr:$count,
+    Optional<I1>:$pred,
+    DefaultValuedAttr<BoolAttr, "false">:$release_fence
+  );
+
+  let assemblyFormat = [{
+    $alloc `,` $count (`,` $pred^)? attr-dict `:` qualified(type($alloc))
+  }];
+
+  let builders = [
+    OpBuilder<(ins "Value":$alloc, "uint32_t":$count), [{
+      return build($_builder, $_state, alloc, count, /*pred=*/Value());
+    }]>,
+    OpBuilder<(ins "Value":$alloc, "uint32_t":$count, "bool":$releaseFence), [{
+      return build($_builder, $_state, alloc, count, /*pred=*/Value(), releaseFence);
+    }]>
+  ];
+
+  let hasVerifier = 1;
+}
+#else
 def TTNG_ArriveBarrierOp : TTNG_Op<"arrive_barrier"> {
   let summary = "perform the arrive operation on an mbarrier";
   let description = [{
@@ -262,6 +306,7 @@ def TTNG_ArriveBarrierOp : TTNG_Op<"arrive_barrier"> {
 
   let hasVerifier = 1;
 }
+#endif
 
 def TTNG_AsyncCopyMbarrierArriveOp : TTNG_Op<"async_copy_mbarrier_arrive"> {
   let summary = "arrive on mbarrier once all previously issued copies are completed";

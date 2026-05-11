@@ -191,6 +191,12 @@ void init_triton_tle_ir(py::module &&m) {
               Value index) -> Value {
              return self.create<ttg::MemDescIndexOp>(resultType, src, index);
            })
+      .def("create_memdesc_subslice",
+           [](TritonOpBuilder &self, Type resultType, Value src,
+              std::vector<int32_t> &offsets) -> Value {
+             return self.create<ttg::MemDescSubsliceOp>(resultType, src,
+                                                        offsets);
+           })
       .def("create_warp_return",
            [](TritonOpBuilder &self) -> Operation * {
              return self.create<ttg::WarpReturnOp>();
@@ -299,7 +305,8 @@ void init_triton_tle_ir(py::module &&m) {
               Value phase, int32_t capacity, const std::string &scope,
               const std::string &pipeName,
               std::vector<std::string> fieldNames,
-              const std::string &readerName) -> Value {
+              const std::string &readerName,
+              std::vector<std::string>) -> Value {
              auto &builder = self.getBuilder();
              SmallVector<Attribute> fieldNameAttrs;
              fieldNameAttrs.reserve(fieldNames.size());
@@ -322,7 +329,8 @@ void init_triton_tle_ir(py::module &&m) {
               int32_t capacity, const std::string &scope,
               const std::string &pipeName,
               std::vector<std::string> fieldNames,
-              const std::string &readerName) -> void {
+              const std::string &readerName,
+              std::vector<std::string>) -> void {
              auto &builder = self.getBuilder();
              SmallVector<Attribute> fieldNameAttrs;
              fieldNameAttrs.reserve(fieldNames.size());
@@ -412,6 +420,23 @@ void init_triton_tle_ir(py::module &&m) {
              }
              return ttg::MemDescType::get(shape, elementType, encoding,
                                           memorySpace, /*mutableMemory=*/true);
+           })
+      .def("get_memdesc_type",
+           [](TritonOpBuilder &self, std::vector<int64_t> shape,
+              Type &elementType, Attribute &encoding, std::string storage,
+              std::vector<int64_t> allocShape) -> Type {
+             auto context = self.getBuilder().getContext();
+             Attribute memorySpace;
+             if (storage == "tmem")
+               memorySpace = ttng::TensorMemorySpaceAttr::get(context);
+             else if (storage == "smem") {
+               memorySpace = ttg::SharedMemorySpaceAttr::get(context);
+             } else {
+               llvm_unreachable("Unknown storage type");
+             }
+             return ttg::MemDescType::get(shape, elementType, encoding,
+                                          memorySpace, /*mutableMemory=*/true,
+                                          allocShape);
            });
 
 }

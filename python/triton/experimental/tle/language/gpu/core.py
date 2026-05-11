@@ -70,6 +70,32 @@ def _as_result_values(results):
     return (results, )
 
 
+def _warp_specialize_capture_key(handle):
+    try:
+        hash(handle)
+    except TypeError:
+        return id(handle)
+    return handle
+
+
+def _deduplicate_warp_specialize_captures(worker_items):
+    capture_handles = []
+    capture_indices = {}
+    deduplicated_items = []
+    for worker_fn, worker_args, flattened in worker_items:
+        remapped = []
+        for handle in flattened:
+            key = _warp_specialize_capture_key(handle)
+            index = capture_indices.get(key)
+            if index is None:
+                index = len(capture_handles)
+                capture_indices[key] = index
+                capture_handles.append(handle)
+            remapped.append(index)
+        deduplicated_items.append((worker_fn, worker_args, flattened, remapped))
+    return capture_handles, deduplicated_items
+
+
 @tl.builtin
 def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _semantic=None, _generator=None):
     """
@@ -109,12 +135,11 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
     result_types = [result.get_type() for result in default_result_handles]
 
     worker_items = []
-    worker_arg_handles = []
     for worker_fn, worker_args in functions_and_args[1:]:
         worker_args = _as_call_args(worker_args)
         flattened = flatten_values_to_ir(worker_args)
         worker_items.append((worker_fn, worker_args, flattened))
-        worker_arg_handles.extend(flattened)
+    worker_arg_handles, worker_items = _deduplicate_warp_specialize_captures(worker_items)
 
     builder.restore_insertion_point(insert_pt)
     ws_op = builder.create_warp_specialize(result_types, worker_arg_handles, worker_num_warps)
@@ -124,15 +149,13 @@ def warp_specialize(functions_and_args, worker_num_warps, worker_num_regs, _sema
     builder.create_block_with_parent(ws_op.get_partition_op_holder(), [])
     partitions_op = builder.create_warp_specialize_partitions(num_partitions)
     partition_arg_types = [arg.get_type() for arg in worker_arg_handles]
-    arg_offset = 0
-    for idx, (worker_fn, worker_args, flattened) in enumerate(worker_items):
+    for idx, (worker_fn, worker_args, flattened, remapped) in enumerate(worker_items):
         block = builder.create_block_with_parent(partitions_op.get_region(idx), partition_arg_types)
-        block_args = [block.get_argument(arg_offset + j) for j in builtins.range(len(flattened))]
+        block_args = [block.get_argument(remapped[j]) for j in builtins.range(len(flattened))]
         block_values = tuple(unflatten_ir_values(block_args, [arg.type for arg in worker_args]))
         caller_context = WarpSpecializeCallerContext(worker_num_warps[idx])
         _generator.call_JitFunction(worker_fn, block_values, kwargs={}, caller_context=caller_context)
         builder.create_warp_return()
-        arg_offset += len(flattened)
 
     builder.set_insertion_point_after(ws_op.get_operation())
     if not default_result_values:

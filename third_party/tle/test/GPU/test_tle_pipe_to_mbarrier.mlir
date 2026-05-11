@@ -16,7 +16,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
   // CHECK-COUNT-4: ttng.init_barrier {{.*}}, 128
   // CHECK: gpu.barrier
   // CHECK: ttng.wait_barrier {{.*}} {async_task_id = array<i32: 0>}
-  // CHECK: ttng.arrive_barrier {{.*}}, 128 {async_task_id = array<i32: 0>}
+  // CHECK: ttng.arrive_barrier {{.*}}, 128 {async_task_id = array<i32: 0>, release_fence = true}
   // CHECK: ttng.wait_barrier {{.*}} {async_task_id = array<i32: 1>}
   // CHECK: ttg.local_load {{.*}} {async_task_id = array<i32: 1>}
   // CHECK: arith.cmpi ne

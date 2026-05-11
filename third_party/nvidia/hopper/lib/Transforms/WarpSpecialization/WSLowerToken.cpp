@@ -76,8 +76,20 @@ void processProducerCommitOp(OpBuilder &builder, ttnvws::ProducerCommitOp op,
       loadType == ttnvws::TokenLoadType::LocalStoreOp) {
     // Get the count from the barriers: trace the local_alloc for the barrier
     // then find the count from init_barrier
+#ifdef __TLE__
+    auto arriveBarrier =
+        ttng::ArriveBarrierOp::create(builder, loc, bufferFull, fullCnt);
+    // Local-store pipe commits publish ordinary shared-memory writes from all
+    // producer threads, while mbarrier.arrive is executed only by the elected
+    // thread. Add an explicit CTA release fence so consumer waits observe the
+    // producer partition's shared-memory stores.
+    if (loadType == ttnvws::TokenLoadType::LocalStoreOp)
+      arriveBarrier.setReleaseFence(true);
+    arriveOp = arriveBarrier;
+#else
     arriveOp =
         ttng::ArriveBarrierOp::create(builder, loc, bufferFull, fullCnt);
+#endif
   } else {
     assert(false);
   }

@@ -15,6 +15,7 @@ import torch
 import triton.language as tl
 import triton.experimental.tle.language as tle
 from triton.language.core import base_value
+from triton.experimental.tle.language.gpu.core import _deduplicate_warp_specialize_captures
 from triton.experimental.tle.language.gpu.semantic import TLESemanticError, TLESemantic
 
 
@@ -67,6 +68,24 @@ class TestPipeline:
         pipe = tle.gpu.pipeline(0, 10, 1, num_stages=2, loop_unroll_factor=4)
         assert pipe.num_stages == 2
         assert pipe.loop_unroll_factor == 4
+
+
+class TestWarpSpecializeFrontend:
+    """Test warp_specialize front-end capture handling."""
+
+    def test_worker_captures_are_deduplicated_across_endpoints(self):
+        shared_k = object()
+        shared_tail = object()
+        unique_q = object()
+
+        captures, items = _deduplicate_warp_specialize_captures([
+            ("consumer0", ("args0", ), [shared_k, shared_tail, unique_q, shared_k]),
+            ("consumer1", ("args1", ), [shared_tail, shared_k]),
+        ])
+
+        assert captures == [shared_k, shared_tail, unique_q]
+        assert items[0][3] == [0, 1, 2, 0]
+        assert items[1][3] == [1, 0]
 
 
 class TestTLESemantic:
@@ -172,9 +191,9 @@ class TestBufferedTensor:
             )
             return "fake_layout"
 
-        def get_memdesc_type(self, shape, element_ty, layout, space):
-            self.memdesc_type_args = (list(shape), element_ty, layout, space)
-            return ("memdesc", tuple(shape), element_ty, layout, space)
+        def get_memdesc_type(self, shape, element_ty, layout, space, alloc_shape=None):
+            self.memdesc_type_args = (list(shape), element_ty, layout, space, alloc_shape)
+            return ("memdesc", tuple(shape), element_ty, layout, space, None if alloc_shape is None else tuple(alloc_shape))
 
         def create_memdesc_index(self, result_ty, src, index):
             self.memdesc_index_args = (result_ty, src, index)
@@ -196,14 +215,16 @@ class TestBufferedTensor:
             self.pipe_ops.append(
                 ("writer_close", list(fields), stage, phase, capacity, scope, pipe_name, list(field_names)))
 
-        def create_pipe_reader_wait(self, fields, stage, phase, capacity, scope, pipe_name, field_names, reader_name):
+        def create_pipe_reader_wait(self, fields, stage, phase, capacity, scope, pipe_name, field_names, reader_name,
+                                    reader_field_names):
             self.pipe_ops.append(("reader_wait", list(fields), stage, phase, capacity, scope, pipe_name,
-                                  list(field_names), reader_name))
+                                  list(field_names), reader_name, list(reader_field_names)))
             return "is_closed"
 
-        def create_pipe_reader_release(self, fields, stage, capacity, scope, pipe_name, field_names, reader_name):
-            self.pipe_ops.append(
-                ("reader_release", list(fields), stage, capacity, scope, pipe_name, list(field_names), reader_name))
+        def create_pipe_reader_release(self, fields, stage, capacity, scope, pipe_name, field_names, reader_name,
+                                       reader_field_names):
+            self.pipe_ops.append(("reader_release", list(fields), stage, capacity, scope, pipe_name, list(field_names),
+                                  reader_name, list(reader_field_names)))
 
     class _FakeSemantic:
 
@@ -253,9 +274,9 @@ class TestBufferedTensor:
         assert slot.dtype == tl.float16
         assert slot.type.storage is tle.gpu.smem
         assert semantic.builder.swizzled_encoding_args == (1, 1, 1, [1, 0], [1, 1], [1, 1], [1, 0])
-        assert semantic.builder.memdesc_type_args == ([16, 32], "fp16", "fake_layout", "smem")
+        assert semantic.builder.memdesc_type_args == ([16, 32], "fp16", "fake_layout", "smem", [16, 32])
         assert semantic.builder.memdesc_index_args == (
-            ("memdesc", (16, 32), "fp16", "fake_layout", "smem"),
+            ("memdesc", (16, 32), "fp16", "fake_layout", "smem", (16, 32)),
             "base",
             "stage_1",
         )
@@ -405,9 +426,9 @@ class TestPipeFrontend:
         assert not hasattr(result.slot, "a")
         assert result.slot.type.fields == [("b", result.slot.b.type)]
         assert semantic.builder.pipe_ops[0] == ("reader_wait", ["base", "base"], "stage_0", "pred_False", 4, "cta",
-                                                "", ["a", "b"], "right")
+                                                "", ["a", "b"], "right", ["b"])
         assert semantic.builder.pipe_ops[1] == ("reader_release", ["base", "base"], "stage_0", 4, "cta", "",
-                                                ["a", "b"], "right")
+                                                ["a", "b"], "right", ["b"])
 
     def test_pipe_reader_rejects_invalid_field_subset(self):
         a, semantic = self._make_buffer([4, 16])
@@ -454,7 +475,7 @@ class TestPipeFrontend:
         assert semantic.builder.pipe_ops[0] == ("writer_acquire", ["base"], "stage_0", "pred_False", 4, "cta",
                                                 "a", ["a"])
         assert semantic.builder.pipe_ops[3] == ("reader_wait", ["base"], "stage_0", "pred_False", 4, "cta", "a",
-                                                ["a"], "")
+                                                ["a"], "", ["a"])
 
     def test_pipe_one_shot_keeps_frontend_contract(self):
         a, semantic = self._make_buffer([1, 16])

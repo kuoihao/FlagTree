@@ -50,3 +50,32 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     tt.return %out : tensor<64x64xf32, #mma1>
   }
 }
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 4], threadsPerWarp = [1, 32], warpsPerCTA = [4, 1], order = [1, 0]}>
+#mma = #ttg.nvidia_mma<{versionMajor = 3, versionMinor = 0, warpsPerCTA = [4, 1], instrShape = [16, 64, 16]}>
+#shared = #ttg.nvmma_shared<{swizzlingByteWidth = 128, transposed = false, elementBitWidth = 16}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:90", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: tt.func @insert_for_warpspec_block_arg_store
+  tt.func @insert_for_warpspec_block_arg_store(%value: tensor<64x64xbf16, #blocked>) {
+    %base = ttg.local_alloc : () -> !ttg.memdesc<64x64xbf16, #shared, #smem, mutable>
+    ttg.warp_specialize(%base, %value) attributes {requestedRegisters = array<i32: 128>}
+    default {
+      ttg.warp_yield
+    }
+    // CHECK: partition0(%[[SMEM:.+]]: !ttg.memdesc
+    partition0(%arg0: !ttg.memdesc<64x64xbf16, #shared, #smem, mutable>, %arg1: tensor<64x64xbf16, #blocked>) num_warps(4) {
+      %acc = arith.constant dense<0.000000e+00> : tensor<64x64xf32, #mma>
+      // CHECK: ttg.local_store {{.*}}, %[[SMEM]]
+      ttg.local_store %arg1, %arg0 : tensor<64x64xbf16, #blocked> -> !ttg.memdesc<64x64xbf16, #shared, #smem, mutable>
+
+      // CHECK-NEXT: tle.wgmma_shared_operand_fence %[[SMEM]]
+      // CHECK-NEXT: ttng.warp_group_dot %[[SMEM]], %[[SMEM]], {{.*}}
+      %out = ttng.warp_group_dot %arg0, %arg0, %acc {inputPrecision = 0 : i32} : !ttg.memdesc<64x64xbf16, #shared, #smem, mutable> * !ttg.memdesc<64x64xbf16, #shared, #smem, mutable> -> tensor<64x64xf32, #mma>
+      ttg.warp_return
+    } : (!ttg.memdesc<64x64xbf16, #shared, #smem, mutable>, tensor<64x64xbf16, #blocked>) -> ()
+    tt.return
+  }
+}

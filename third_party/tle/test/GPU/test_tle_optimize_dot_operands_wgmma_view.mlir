@@ -53,7 +53,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %b = ttg.local_load %b_slot : !ttg.memdesc<64x512xbf16, #shared, #smem, mutable> -> tensor<64x512xbf16, #blocked>
     %b_t = tt.trans %b {order = array<i32: 1, 0>} : tensor<64x512xbf16, #blocked> -> tensor<512x64xbf16, #blocked1>
 
-    // CHECK: %[[VIEW:.+]] = tle.memdesc_wgmma_view %[[B_SLOT]] {order = array<i32: 1, 0>} : !ttg.memdesc<64x512xbf16, #shared, #smem, mutable> -> !ttg.memdesc<512x64xbf16, #shared, #smem>
+    // CHECK: %[[VIEW:.+]] = tle.memdesc_wgmma_view %[[B_SLOT]] {order = array<i32: 1, 0>} : !ttg.memdesc<64x512xbf16, #shared, #smem, mutable> -> !ttg.memdesc<512x64xbf16, #shared1, #smem, mutable>
     // CHECK-NOT: ttg.local_alloc {{.*}} : (tensor<512x64xbf16
     // CHECK: ttng.warp_group_dot {{.*}}, %[[VIEW]], {{.*}}
     %b_alloc = ttg.local_alloc %b_t : (tensor<512x64xbf16, #blocked1>) -> !ttg.memdesc<512x64xbf16, #shared, #smem>
@@ -79,6 +79,48 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     tt.return %out : tensor<64x256xf32, #mma>
   }
 
+  // CHECK-LABEL: tt.func @reuse_transposed_wgmma_b_from_subsliced_smem_preserves_alloc_shape
+  tt.func @reuse_transposed_wgmma_b_from_subsliced_smem_preserves_alloc_shape(
+      %a: tensor<64x256xbf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 2}>>) -> tensor<64x64xf32, #mma> {
+    %c0 = arith.constant 0 : i32
+    %acc = arith.constant dense<0.000000e+00> : tensor<64x64xf32, #mma>
+
+    %b_smem = ttg.local_alloc : () -> !ttg.memdesc<2x64x512xbf16, #shared, #smem, mutable>
+    %b_slot = ttg.memdesc_index %b_smem[%c0] : !ttg.memdesc<2x64x512xbf16, #shared, #smem, mutable> -> !ttg.memdesc<64x512xbf16, #shared, #smem, mutable>
+    // CHECK: %[[B_SUB:.+]] = ttg.memdesc_subslice %{{.*}}[0, 256] : !ttg.memdesc<64x512xbf16, #shared, #smem, mutable> -> !ttg.memdesc<64x256xbf16, #shared, #smem, mutable, 64x512>
+    %b_sub = ttg.memdesc_subslice %b_slot[0, 256] : !ttg.memdesc<64x512xbf16, #shared, #smem, mutable> -> !ttg.memdesc<64x256xbf16, #shared, #smem, mutable, 64x512>
+    %b = ttg.local_load %b_sub : !ttg.memdesc<64x256xbf16, #shared, #smem, mutable, 64x512> -> tensor<64x256xbf16, #blocked>
+    %b_t = tt.trans %b {order = array<i32: 1, 0>} : tensor<64x256xbf16, #blocked> -> tensor<256x64xbf16, #blocked1>
+
+    // CHECK: %[[VIEW:.+]] = tle.memdesc_wgmma_view %[[B_SUB]] {order = array<i32: 1, 0>} : !ttg.memdesc<64x256xbf16, #shared, #smem, mutable, 64x512> -> !ttg.memdesc<256x64xbf16, #shared1, #smem, mutable, 512x64>
+    // CHECK-NOT: ttg.local_alloc {{.*}} : (tensor<256x64xbf16
+    // CHECK: ttng.warp_group_dot {{.*}}, %[[VIEW]], {{.*}}
+    %b_alloc = ttg.local_alloc %b_t : (tensor<256x64xbf16, #blocked1>) -> !ttg.memdesc<256x64xbf16, #shared1, #smem>
+    %out = ttng.warp_group_dot %a, %b_alloc, %acc {inputPrecision = 0 : i32} : tensor<64x256xbf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 2}>> * !ttg.memdesc<256x64xbf16, #shared1, #smem> -> tensor<64x64xf32, #mma>
+    tt.return %out : tensor<64x64xf32, #mma>
+  }
+
+  // CHECK-LABEL: tt.func @reuse_canonicalized_transposed_wgmma_b_from_subsliced_smem_preserves_alloc_shape
+  tt.func @reuse_canonicalized_transposed_wgmma_b_from_subsliced_smem_preserves_alloc_shape(
+      %a: tensor<64x256xbf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 2}>>) -> tensor<64x64xf32, #mma> {
+    %c0 = arith.constant 0 : i32
+    %acc = arith.constant dense<0.000000e+00> : tensor<64x64xf32, #mma>
+
+    %b_smem = ttg.local_alloc : () -> !ttg.memdesc<2x64x512xbf16, #shared, #smem, mutable>
+    %b_slot = ttg.memdesc_index %b_smem[%c0] : !ttg.memdesc<2x64x512xbf16, #shared, #smem, mutable> -> !ttg.memdesc<64x512xbf16, #shared, #smem, mutable>
+    // CHECK: %[[B_SUB:.+]] = ttg.memdesc_subslice %{{.*}}[0, 256] : !ttg.memdesc<64x512xbf16, #shared, #smem, mutable> -> !ttg.memdesc<64x256xbf16, #shared, #smem, mutable, 64x512>
+    %b_sub = ttg.memdesc_subslice %b_slot[0, 256] : !ttg.memdesc<64x512xbf16, #shared, #smem, mutable> -> !ttg.memdesc<64x256xbf16, #shared, #smem, mutable, 64x512>
+    %b = ttg.local_load %b_sub : !ttg.memdesc<64x256xbf16, #shared, #smem, mutable, 64x512> -> tensor<64x256xbf16, #blocked>
+    %b_alloc = ttg.local_alloc %b : (tensor<64x256xbf16, #blocked>) -> !ttg.memdesc<64x256xbf16, #shared, #smem>
+
+    // CHECK: %[[VIEW:.+]] = tle.memdesc_wgmma_view %[[B_SUB]] {order = array<i32: 1, 0>} : !ttg.memdesc<64x256xbf16, #shared, #smem, mutable, 64x512> -> !ttg.memdesc<256x64xbf16, #shared1, #smem, mutable, 512x64>
+    // CHECK-NOT: ttg.memdesc_trans
+    // CHECK: ttng.warp_group_dot {{.*}}, %[[VIEW]], {{.*}}
+    %b_trans = ttg.memdesc_trans %b_alloc {order = array<i32: 1, 0>} : !ttg.memdesc<64x256xbf16, #shared, #smem> -> !ttg.memdesc<256x64xbf16, #shared1, #smem>
+    %out = ttng.warp_group_dot %a, %b_trans, %acc {inputPrecision = 0 : i32} : tensor<64x256xbf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 2}>> * !ttg.memdesc<256x64xbf16, #shared1, #smem> -> tensor<64x64xf32, #mma>
+    tt.return %out : tensor<64x64xf32, #mma>
+  }
+
   // CHECK-LABEL: tt.func @reuse_transposed_wgmma_a_from_indexed_smem_with_wait
   tt.func @reuse_transposed_wgmma_a_from_indexed_smem_with_wait(
       %b: !ttg.memdesc<64x64xbf16, #shared1, #smem, mutable>) -> tensor<256x64xf32, #mma> {
@@ -91,7 +133,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %a = ttg.local_load %a_slot : !ttg.memdesc<64x256xbf16, #shared, #smem, mutable> -> tensor<64x256xbf16, #blocked>
     %a_t = tt.trans %a {order = array<i32: 1, 0>} : tensor<64x256xbf16, #blocked> -> tensor<256x64xbf16, #blocked1>
 
-    // CHECK: %[[VIEW:.+]] = tle.memdesc_wgmma_view %[[A_SLOT]] {order = array<i32: 1, 0>} : !ttg.memdesc<64x256xbf16, #shared, #smem, mutable> -> !ttg.memdesc<256x64xbf16, #shared1, #smem>
+    // CHECK: %[[VIEW:.+]] = tle.memdesc_wgmma_view %[[A_SLOT]] {order = array<i32: 1, 0>} : !ttg.memdesc<64x256xbf16, #shared, #smem, mutable> -> !ttg.memdesc<256x64xbf16, #shared1, #smem, mutable>
     // CHECK-NOT: ttg.local_alloc {{.*}} : (tensor<256x64xbf16
     // CHECK: %[[DOT:.+]] = ttng.warp_group_dot %[[VIEW]], %arg0, {{.*}}
     %a_alloc = ttg.local_alloc %a_t : (tensor<256x64xbf16, #blocked1>) -> !ttg.memdesc<256x64xbf16, #shared1, #smem>
@@ -114,7 +156,7 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %a = ttg.local_load %a_slot : !ttg.memdesc<64x256xbf16, #shared, #smem, mutable> -> tensor<64x256xbf16, #blocked>
     %a_t = tt.trans %a {order = array<i32: 1, 0>} : tensor<64x256xbf16, #blocked> -> tensor<256x64xbf16, #blocked1>
 
-    // CHECK: %[[VIEW:.+]] = tle.memdesc_wgmma_view %[[A_SLOT]] {order = array<i32: 1, 0>} : !ttg.memdesc<64x256xbf16, #shared, #smem, mutable> -> !ttg.memdesc<256x64xbf16, #shared1, #smem>
+    // CHECK: %[[VIEW:.+]] = tle.memdesc_wgmma_view %[[A_SLOT]] {order = array<i32: 1, 0>} : !ttg.memdesc<64x256xbf16, #shared, #smem, mutable> -> !ttg.memdesc<256x64xbf16, #shared1, #smem, mutable>
     // CHECK-NOT: ttg.local_alloc {{.*}} : (tensor<256x64xbf16
     // CHECK-NOT: ttg.local_load {{.*}} -> tensor<256x64xbf16, #ttg.dot_op
     // CHECK: ttng.warp_group_dot %[[VIEW]], %arg0, {{.*}}

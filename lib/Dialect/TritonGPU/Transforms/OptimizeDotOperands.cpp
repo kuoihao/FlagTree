@@ -79,6 +79,15 @@ static Value getUnderlyingMemDesc(Value value) {
 static bool isBackedByLocalAlloc(Value value) {
   return getUnderlyingMemDesc(value).getDefiningOp<LocalAllocOp>() != nullptr;
 }
+
+static SmallVector<int64_t> getPermutedAllocShape(MemDescType srcTy,
+                                                  ArrayRef<int32_t> order) {
+  SmallVector<int64_t> allocShape =
+      applyPermutation(srcTy.getAllocShape().take_back(order.size()), order);
+  allocShape.insert(allocShape.begin(), srcTy.getAllocShape().begin(),
+                    srcTy.getAllocShape().end() - order.size());
+  return allocShape;
+}
 #endif
 
 // Given
@@ -208,7 +217,7 @@ public:
       auto srcMemDescTy = dyn_cast<MemDescType>(srcMemDesc.getType());
       if (srcMemDescTy && srcMemDescTy.getShape() == srcTy.getShape() &&
           srcMemDescTy.getElementType() == srcTy.getElementType() &&
-          srcMemDesc.getDefiningOp<LocalAllocOp>()) {
+          isBackedByLocalAlloc(srcMemDesc)) {
         Attribute viewEncoding;
         Dialect &srcDialect = srcMemDescTy.getEncoding().getDialect();
         auto srcInferLayoutInterface =
@@ -221,12 +230,8 @@ public:
 
         auto viewShape =
             applyPermutation(srcMemDescTy.getShape(), trans.getOrder());
-        SmallVector<int64_t> viewAllocShape = applyPermutation(
-            srcMemDescTy.getAllocShape().take_back(trans.getOrder().size()),
-            trans.getOrder());
-        viewAllocShape.insert(
-            viewAllocShape.begin(), srcMemDescTy.getAllocShape().begin(),
-            srcMemDescTy.getAllocShape().end() - trans.getOrder().size());
+        SmallVector<int64_t> viewAllocShape =
+            getPermutedAllocShape(srcMemDescTy, trans.getOrder());
         auto viewType =
             MemDescType::get(viewShape, srcMemDescTy.getElementType(),
                              viewEncoding, srcMemDescTy.getMemorySpace(),
@@ -302,10 +307,20 @@ public:
     if (!isBackedByLocalAlloc(srcMemDesc))
       return failure();
 
+    auto viewShape =
+        applyPermutation(srcMemDescTy.getShape(), transOp.getOrder());
+    auto viewTy = MemDescType::get(
+        viewShape, srcMemDescTy.getElementType(), transTy.getEncoding(),
+        srcMemDescTy.getMemorySpace(), srcMemDescTy.getMutableMemory(),
+        getPermutedAllocShape(srcMemDescTy, transOp.getOrder()));
     rewriter.getContext()->getOrLoadDialect<triton::tle::TleDialect>();
-    auto view = rewriter.replaceOpWithNewOp<triton::tle::MemDescWGMMAViewOp>(
-        transOp, transOp.getType(), srcMemDesc, transOp.getOrder());
+    rewriter.setInsertionPoint(transOp);
+    auto view = triton::tle::MemDescWGMMAViewOp::create(
+        rewriter, transOp.getLoc(), viewTy, srcMemDesc, transOp.getOrder());
     (void)view;
+    mlir::triton::replaceUsesAndPropagateType(rewriter, transOp, view);
+    if (transOp->use_empty())
+      rewriter.eraseOp(transOp);
     if (allocOp->use_empty())
       rewriter.eraseOp(allocOp);
     if (localLoad->use_empty())
@@ -375,8 +390,13 @@ public:
 
     rewriter.getContext()->getOrLoadDialect<triton::tle::TleDialect>();
     rewriter.setInsertionPoint(allocOp);
+    auto viewTy =
+        MemDescType::get(transposedShape, srcMemDescTy.getElementType(),
+                         allocTy.getEncoding(), srcMemDescTy.getMemorySpace(),
+                         srcMemDescTy.getMutableMemory(),
+                         getPermutedAllocShape(srcMemDescTy, trans.getOrder()));
     auto view = triton::tle::MemDescWGMMAViewOp::create(
-        rewriter, allocOp.getLoc(), allocTy, srcMemDesc, trans.getOrder());
+        rewriter, allocOp.getLoc(), viewTy, srcMemDesc, trans.getOrder());
     mlir::triton::replaceUsesAndPropagateType(rewriter, allocOp, view);
 
     if (allocOp->use_empty())
@@ -453,7 +473,8 @@ public:
     rewriter.setInsertionPoint(dotOp);
     auto viewTy = MemDescType::get(
         transposedShape, srcMemDescTy.getElementType(), viewEncoding,
-        srcMemDescTy.getMemorySpace(), srcMemDescTy.getMutableMemory());
+        srcMemDescTy.getMemorySpace(), srcMemDescTy.getMutableMemory(),
+        getPermutedAllocShape(srcMemDescTy, trans.getOrder()));
     auto view = triton::tle::MemDescWGMMAViewOp::create(
         rewriter, dotOp.getLoc(), viewTy, srcMemDesc, trans.getOrder());
     auto newDot = triton::nvidia_gpu::WarpGroupDotOp::create(
@@ -550,7 +571,8 @@ public:
     auto viewTy =
         MemDescType::get(transposedShape, srcMemDescTy.getElementType(),
                          viewEncoding, srcMemDescTy.getMemorySpace(),
-                         allocTy.getMutableMemory());
+                         srcMemDescTy.getMutableMemory(),
+                         getPermutedAllocShape(srcMemDescTy, trans.getOrder()));
     auto view = triton::tle::MemDescWGMMAViewOp::create(
         rewriter, allocOp.getLoc(), viewTy, srcMemDesc, trans.getOrder());
     auto newDot = triton::nvidia_gpu::WarpGroupDotOp::create(
