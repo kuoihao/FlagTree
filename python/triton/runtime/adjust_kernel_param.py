@@ -197,6 +197,18 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
                 self.cdiv_calls.append(virtual_cdiv)
         self.generic_visit(node)
 
+    # Treat `expr.T` (inline transpose) as semantically equivalent to
+    # `tl.trans(expr)` for the purpose of descriptor transpose analysis.
+    # The `.T` form appears commonly inside `tl.dot(a, b.T, ...)` style code
+    # (e.g. python/tutorials/09-persistent-matmul.py) where the user never
+    # actually invokes `tl.trans`. Without this, the analyzer would mistake
+    # the load result for the canonical layout and emit an "inconsistent
+    # bshape" warning while computing K.
+    def visit_Attribute(self, node):
+        if node.attr == 'T':
+            self.transpose_args_nodes.append(node.value)
+        self.generic_visit(node)
+
     # If `call_node` invokes a user-defined helper whose body wraps
     # `tl.cdiv(p_X, p_BLOCK_X)` (with p_X, p_BLOCK_X being the helper's formals),
     # build a synthetic `tl.cdiv(call_node.args[i], call_node.args[j])` Call
