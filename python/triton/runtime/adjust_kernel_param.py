@@ -706,8 +706,55 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
             print(f"[Analyzer] load_map={load_map}")
         return load_map
 
+    # Extract KEY (str) from `nargs["KEY"]` or `nargs.get("KEY", ...)`, where
+    # `nargs` is whatever the hook function names its first parameter.
+    # Returns None if `value_node` does not match either pattern.
+    @staticmethod
+    def _extract_nargs_key(value_node: ast.AST, nargs_param: str) -> str | None:
+        # Form 1: nargs["KEY"]
+        if isinstance(value_node, ast.Subscript) and isinstance(value_node.value, ast.Name):
+            if value_node.value.id == nargs_param:
+                sl = value_node.slice
+                if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
+                    return sl.value
+                # py3.8 backward-compat: ast.Index(Constant(...))
+                inner = getattr(sl, "value", None)
+                if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                    return inner.value
+        # Form 2: nargs.get("KEY", ...)
+        if isinstance(value_node, ast.Call):
+            f = value_node.func
+            if (isinstance(f, ast.Attribute) and f.attr == "get" and isinstance(f.value, ast.Name)
+                    and f.value.id == nargs_param and value_node.args
+                    and isinstance(value_node.args[0], ast.Constant)
+                    and isinstance(value_node.args[0].value, str)):
+                return value_node.args[0].value
+        return None
+
     # Parse nargs["a_desc"].block_shape = [BLOCK_M, BLOCK_K] in a pre_hook
     def _parse_hook_desc_bshapes(self, hook_ast: ast.FunctionDef) -> dict[str, list[list[str]]]:
+        # Hook's first parameter name (typically 'nargs').
+        nargs_param = hook_ast.args.args[0].arg if hook_ast.args.args else None
+
+        # Build local-name -> constexpr-key substitution from hook-local rebinds:
+        #   BLOCK_M = nargs["BLOCK_SIZE_M"]            -> {'BLOCK_M': 'BLOCK_SIZE_M'}
+        #   BLOCK_M = nargs.get("BLOCK_SIZE_M", ...)   -> {'BLOCK_M': 'BLOCK_SIZE_M'}
+        # Without this, hooks that rename constexprs locally (a common pattern)
+        # leak hook-local names into bs_names, causing KeyError downstream when
+        # `current[bs_name]` is looked up against the kernel's actual constexpr
+        # parameter names.
+        local_to_key = dict[str, str]()
+        if nargs_param is not None:
+            for stmt in ast.walk(hook_ast):
+                if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+                    continue
+                tgt = stmt.targets[0]
+                if not isinstance(tgt, ast.Name):
+                    continue
+                key = self._extract_nargs_key(stmt.value, nargs_param)
+                if key is not None:
+                    local_to_key[tgt.id] = key
+
         ret = dict[str, list[list[str]]]()
         for node in ast.walk(hook_ast):
             if not isinstance(node, ast.Assign) or len(node.targets) != 1:
@@ -737,7 +784,8 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
             desc_bshape = list[str]()
             for elt in node.value.elts:
                 if isinstance(elt, ast.Name):
-                    desc_bshape.append(elt.id)
+                    # Rewrite hook-local rebinds back to the actual constexpr name.
+                    desc_bshape.append(local_to_key.get(elt.id, elt.id))
             if desc_bshape:  # ['BLOCK_M', 'BLOCK_K']
                 ret.setdefault(desc_name, list[list[str]]()) \
                    .append(desc_bshape)
