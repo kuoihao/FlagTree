@@ -725,8 +725,7 @@ class KernelDependencyAnalyzer(ast.NodeVisitor):
         if isinstance(value_node, ast.Call):
             f = value_node.func
             if (isinstance(f, ast.Attribute) and f.attr == "get" and isinstance(f.value, ast.Name)
-                    and f.value.id == nargs_param and value_node.args
-                    and isinstance(value_node.args[0], ast.Constant)
+                    and f.value.id == nargs_param and value_node.args and isinstance(value_node.args[0], ast.Constant)
                     and isinstance(value_node.args[0].value, str)):
                 return value_node.args[0].value
         return None
